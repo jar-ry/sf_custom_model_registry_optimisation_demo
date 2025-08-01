@@ -10,7 +10,7 @@ import logging
 from typing import Optional, Dict, Any
 import snowflake.connector
 from snowflake.snowpark import Session
-from snowflake.ml.feature_store import FeatureStore
+from snowflake.ml.feature_store import FeatureStore, CreationMode
 from snowflake.ml.registry import Registry
 from snowflake.connector import DictCursor
 
@@ -167,11 +167,13 @@ class SnowflakeManager:
             session = self.get_session()
             fs_database = database or os.getenv('SNOWFLAKE_DATABASE')
             fs_schema = schema or os.getenv('SNOWFLAKE_SCHEMA')
+            logger.info(f"🔧 Creating Feature Store in: {fs_database}.{fs_schema}")
             self._feature_store = FeatureStore(
                 session=session,
                 database=fs_database,
                 name=fs_schema,
-                default_warehouse=os.getenv('SNOWFLAKE_WAREHOUSE')
+                default_warehouse=os.getenv('SNOWFLAKE_WAREHOUSE'),
+                creation_mode=CreationMode.CREATE_IF_NOT_EXIST
             )
             logger.info(f"✅ Initialized Feature Store: {fs_database}.{fs_schema}")
         

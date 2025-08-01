@@ -3,7 +3,7 @@ Example: Registering Transportation LP Model with Snowflake Model Registry
 =========================================================================
 
 This script demonstrates how to register your transportation optimization
-model with Snowflake's model registry.
+model with Snowflake's model registry. Model uses feature store for cost matrices.
 """
 
 import os
@@ -19,15 +19,21 @@ def register_transportation_model():
     Prerequisites:
     1. Snowflake session established
     2. Model registry database/schema created
-    3. Appropriate permissions
+    3. Transportation feature store set up
+    4. Appropriate permissions
     """
     
     # Step 1: Create the Snowflake-compatible model
     print("Creating Snowflake-compatible transportation model...")
-    sf_model = create_snowflake_model(
-        config_template_file='./configs/constraints.json',
-        cost_matrix_file='./data/cost_matrix.csv'
-    )
+    try:
+        sf_model = create_snowflake_model(
+            config_template_file='./configs/constraints.json'
+        )
+        print("✅ Model created successfully")
+    except Exception as e:
+        print(f"❌ Failed to create model: {e}")
+        print("Make sure the feature store is set up first with 'python main.py --setup-fs'")
+        return
     
     # Step 2: Test the model locally first
     print("Testing model locally...")
@@ -37,18 +43,24 @@ def register_transportation_model():
         'warehouse_b_capacity': 80,
         'customer_1_demand': 70,
         'customer_2_demand': 60,
-        'cost_a_to_1': 5,
-        'cost_a_to_2': 8,
-        'cost_b_to_1': 6,
-        'cost_b_to_2': 4
+        'use_feature_store': True  # Use feature store for cost matrix
     }])
     
-    test_result = sf_model.predict(test_input)
-    print(f"Test result: ${test_result.loc[0, 'optimal_cost']:.2f}")
+    try:
+        test_result = sf_model.predict(test_input)
+        print(f"Test result: ${test_result.loc[0, 'optimal_cost']:.2f}")
+        print(f"Cost matrix source: {test_result.loc[0, 'cost_matrix_source']}")
+    except Exception as e:
+        print(f"❌ Model test failed: {e}")
+        return
     
     # Step 3: Connect to Snowflake model registry
-    # Note: You need to establish a Snowflake session first
-    model_registry = get_model_registry()
+    try:
+        model_registry = get_model_registry()
+        print("✅ Connected to model registry")
+    except Exception as e:
+        print(f"❌ Failed to connect to model registry: {e}")
+        return
     
     # Step 4: Register the model
     print("Registering model with Snowflake...")
@@ -56,26 +68,43 @@ def register_transportation_model():
     current_dir = os.getcwd()
     models_path = os.path.join(current_dir, "models")
 
-    model_version = model_registry.log_model(
-        model=sf_model,
-        model_name="transportation_optimizer",
-        version_name="V1_3",
-        comment="Transportation linear programming optimization model",
-        sample_input_data=test_input,
-        conda_dependencies=["pulp>=2.7.0"],
-        code_paths=[models_path]
-    )
+    try:
+        model_version = model_registry.log_model(
+            model=sf_model,
+            model_name="TRANSPORTATION_OPTIMIZER_FS",  # Feature Store version
+            version_name="V1_0",
+            conda_dependencies=[models_path],
+            sample_input_data=test_input,
+            comment="Transportation optimization model with Snowflake Feature Store integration"
+        )
+        
+        print(f"✅ Model registered successfully!")
+        print(f"Model name: TRANSPORTATION_OPTIMIZER_FS")
+        print(f"Version: V1_0") 
+        print(f"Model version: {model_version}")
+        
+        print("\n📋 Usage in Snowflake SQL:")
+        print("""
+        WITH mv AS MODEL "TRANSPORTATION_OPTIMIZER_FS" VERSION "V1_0"
+        SELECT
+            *,
+            mv ! "PREDICT"(
+                SCENARIO_NAME,
+                WAREHOUSE_A_CAPACITY,
+                WAREHOUSE_B_CAPACITY,
+                CUSTOMER_1_DEMAND,
+                CUSTOMER_2_DEMAND,
+                NULL, NULL, NULL, NULL,  -- No cost overrides needed
+                TRUE,  -- use_feature_store
+                NULL   -- feature_timestamp (use current)
+            )
+        FROM transportation_scenarios;
+        """)
+        
+    except Exception as e:
+        print(f"❌ Model registration failed: {e}")
 
-    set_default_version_sql = """
-    ALTER MODEL MLOPS_DATABASE.MLOPS_SCHEMA.transportation_optimizer
-    SET DEFAULT_VERSION = 'V1_3';
-    """
 
-    results = get_snowflake_connection().cursor().execute(set_default_version_sql)
-    print(results)
-    
-    print("Model registered successfully!")
-    print("You can now use it for inference in Snowflake")
-    
-    return True
+if __name__ == "__main__":
+    register_transportation_model()
 

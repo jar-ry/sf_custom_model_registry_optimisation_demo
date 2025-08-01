@@ -4,6 +4,7 @@ Snowflake Custom Model Wrapper for Transportation Linear Programming
 
 This module wraps the TransportationLP model to be compatible with 
 Snowflake's model registry using the custom model framework.
+Enhanced with Feature Store integration for dynamic cost matrix retrieval.
 """
 
 import pickle
@@ -12,16 +13,16 @@ import json
 import tempfile
 import os
 from typing import Dict, Any
+from datetime import datetime
 from snowflake.ml.model import custom_model
 from models.transportation_lp import TransportationLP
-from helper.model_utils import generate_cost_matrix
 
 class SnowflakeTransportationModel(custom_model.CustomModel):
     """
     Snowflake custom model wrapper for transportation optimization.
     
-    This model uses the existing config template from config/constraints.json
-    and allows runtime parameter overrides for different scenarios.
+    Enhanced with Feature Store integration for dynamic cost matrix retrieval.
+    Uses only feature store for cost matrices - no default cost matrix fallback.
     
     Input format (DataFrame columns):
     - scenario_name: Name of the optimization scenario
@@ -33,8 +34,10 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
     - cost_a_to_2: (Optional) Override cost from Warehouse A to Customer 2
     - cost_b_to_1: (Optional) Override cost from Warehouse B to Customer 1
     - cost_b_to_2: (Optional) Override cost from Warehouse B to Customer 2
+    - use_feature_store: (Optional) Use feature store for cost matrix (default: True)
+    - feature_timestamp: (Optional) Point-in-time timestamp for feature lookup
     
-    Note: If parameters are not provided, defaults from config template are used.
+    Note: If cost parameters are not provided, costs will be retrieved from feature store.
     
     Output format (DataFrame columns):
     - scenario_name: Input scenario name
@@ -46,6 +49,8 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
     - shipment_b_to_2: Units shipped from B to Customer 2
     - warehouse_a_utilization: Percentage of Warehouse A capacity used
     - warehouse_b_utilization: Percentage of Warehouse B capacity used
+    - cost_matrix_source: Source of cost matrix (feature_store or override)
+    - feature_timestamp: Timestamp used for feature lookup (if applicable)
     """
     
     def __init__(self, context: custom_model.ModelContext) -> None:
@@ -59,14 +64,40 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
         
         with open(config_file, 'r') as f:
             self.base_config = json.load(f)
+            
+        # Initialize feature store manager - required for this model
+        self.feature_store_manager = None
+        self._init_feature_store()
         
-        # Load any pre-trained components or configurations if needed
-        if 'cost_matrix_file' in self.context.artifacts:
-            self.default_cost_matrix = pd.read_csv(self.context.artifacts['cost_matrix_file'])
-        else:
-            # Default to generate cost matrix
-            self.default_cost_matrix = generate_cost_matrix()
+        if self.feature_store_manager is None:
+            raise ValueError("Feature store is required for this model. Please ensure feature store is properly configured.")
     
+    def _init_feature_store(self):
+        """Initialize feature store manager."""
+        try:
+            from helper.feature_store_utils import TransportationFeatureStore
+            self.feature_store_manager = TransportationFeatureStore()
+        except ImportError as e:
+            raise ImportError("Feature store utilities not available. Please ensure Snowflake ML dependencies are installed.") from e
+        except Exception as e:
+            raise RuntimeError(f"Could not initialize feature store: {e}") from e
+    
+    def _get_cost_matrix_from_feature_store(self, feature_timestamp: datetime = None) -> pd.DataFrame:
+        """
+        Retrieve cost matrix from feature store.
+        
+        Args:
+            feature_timestamp: Point-in-time timestamp for feature lookup
+            
+        Returns:
+            Cost matrix DataFrame
+        """
+        if self.feature_store_manager is None:
+            raise ValueError("Feature store not available")
+        
+        cost_matrix = self.feature_store_manager.get_latest_cost_matrix(feature_timestamp)
+        return cost_matrix
+
     @custom_model.inference_api
     def predict(self, input: pd.DataFrame) -> pd.DataFrame:
         """
@@ -84,6 +115,11 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
             try:
                 # Extract scenario parameters
                 scenario_name = row.get('scenario_name', f'scenario_{len(results)}')
+                use_feature_store = row.get('use_feature_store', True)
+                feature_timestamp = row.get('feature_timestamp', None)
+                
+                if feature_timestamp and isinstance(feature_timestamp, str):
+                    feature_timestamp = datetime.fromisoformat(feature_timestamp)
                 
                 # Create dynamic configuration based on template
                 config = json.loads(json.dumps(self.base_config))  # Deep copy
@@ -100,16 +136,29 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
                 if 'customer_2_demand' in row:
                     config['customers']['Customer_2']['demand'] = int(row['customer_2_demand'])
                 
-                # Create dynamic cost matrix if provided
-                cost_matrix = self.default_cost_matrix.copy()
-                if 'cost_a_to_1' in row:
-                    cost_matrix.loc['Warehouse_A', 'Customer_1'] = row['cost_a_to_1']
-                if 'cost_a_to_2' in row:
-                    cost_matrix.loc['Warehouse_A', 'Customer_2'] = row['cost_a_to_2']
-                if 'cost_b_to_1' in row:
-                    cost_matrix.loc['Warehouse_B', 'Customer_1'] = row['cost_b_to_1']
-                if 'cost_b_to_2' in row:
-                    cost_matrix.loc['Warehouse_B', 'Customer_2'] = row['cost_b_to_2']
+                # Determine cost matrix source
+                cost_matrix_source = "feature_store"
+                
+                # Check if individual cost overrides are provided
+                has_cost_overrides = any(col in row for col in ['cost_a_to_1', 'cost_a_to_2', 'cost_b_to_1', 'cost_b_to_2'])
+                
+                if has_cost_overrides and not use_feature_store:
+                    # Use override costs only if feature store is explicitly disabled
+                    cost_matrix = self._get_cost_matrix_from_feature_store(feature_timestamp)
+                    # Apply overrides on top of feature store data
+                    if 'cost_a_to_1' in row:
+                        cost_matrix.loc['Warehouse_A', 'Customer_1'] = row['cost_a_to_1']
+                    if 'cost_a_to_2' in row:
+                        cost_matrix.loc['Warehouse_A', 'Customer_2'] = row['cost_a_to_2']
+                    if 'cost_b_to_1' in row:
+                        cost_matrix.loc['Warehouse_B', 'Customer_1'] = row['cost_b_to_1']
+                    if 'cost_b_to_2' in row:
+                        cost_matrix.loc['Warehouse_B', 'Customer_2'] = row['cost_b_to_2']
+                    cost_matrix_source = "override"
+                else:
+                    # Always use feature store for cost matrix
+                    cost_matrix = self._get_cost_matrix_from_feature_store(feature_timestamp)
+                    cost_matrix_source = "feature_store"
                 
                 # Create temporary files for the LP model
                 cost_data = []
@@ -148,7 +197,9 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
                             'shipment_b_to_1': summary['shipments']['Warehouse_B']['Customer_1'],
                             'shipment_b_to_2': summary['shipments']['Warehouse_B']['Customer_2'],
                             'warehouse_a_utilization': summary['warehouse_utilization']['Warehouse_A']['utilization_rate'],
-                            'warehouse_b_utilization': summary['warehouse_utilization']['Warehouse_B']['utilization_rate']
+                            'warehouse_b_utilization': summary['warehouse_utilization']['Warehouse_B']['utilization_rate'],
+                            'cost_matrix_source': cost_matrix_source,
+                            'feature_timestamp': feature_timestamp.isoformat() if feature_timestamp else None
                         }
                     else:
                         result = {
@@ -160,7 +211,9 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
                             'shipment_b_to_1': 0,
                             'shipment_b_to_2': 0,
                             'warehouse_a_utilization': 0,
-                            'warehouse_b_utilization': 0
+                            'warehouse_b_utilization': 0,
+                            'cost_matrix_source': cost_matrix_source,
+                            'feature_timestamp': feature_timestamp.isoformat() if feature_timestamp else None
                         }
                 
                 finally:
@@ -182,7 +235,9 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
                     'shipment_b_to_1': 0,
                     'shipment_b_to_2': 0,
                     'warehouse_a_utilization': 0,
-                    'warehouse_b_utilization': 0
+                    'warehouse_b_utilization': 0,
+                    'cost_matrix_source': "error",
+                    'feature_timestamp': None
                 }
             
             results.append(result)
@@ -190,15 +245,11 @@ class SnowflakeTransportationModel(custom_model.CustomModel):
         return pd.DataFrame(results)
 
 
-def create_snowflake_model(
-    cost_matrix_file: str = None, 
-    config_template_file: str = None
-) -> SnowflakeTransportationModel:
+def create_snowflake_model(config_template_file: str = None) -> SnowflakeTransportationModel:
     """
     Factory function to create a Snowflake-compatible transportation model.
     
     Args:
-        cost_matrix_file: Optional path to pickled cost matrix file
         config_template_file: Optional path to config template JSON file
                              (defaults to 'config/constraints.json')
         
@@ -206,9 +257,6 @@ def create_snowflake_model(
         SnowflakeTransportationModel instance ready for registry
     """
     context_kwargs = {}
-    
-    if cost_matrix_file and os.path.exists(cost_matrix_file):
-        context_kwargs['cost_matrix_file'] = cost_matrix_file
     
     if config_template_file and os.path.exists(config_template_file):
         context_kwargs['config_template_file'] = config_template_file
