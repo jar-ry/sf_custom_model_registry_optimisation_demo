@@ -1,0 +1,15 @@
+name: ml_optimization_demo
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pandas>=1.5.0
+  - numpy>=1.21.0
+  - pip
+  - pip:
+    - pulp>=2.7.0
+    - snowflake-ml-python>=1.9.0
+    - snowflake-snowpark-python>=1.35.0
+    - python-dotenv>=1.0.0
+    - cryptography>=3.4.0 

@@ -1,0 +1,26 @@
+{
+    "warehouses": {
+        "Warehouse_A": {
+            "capacity": 100,
+            "description": "Maximum units that can be shipped from Warehouse A"
+        },
+        "Warehouse_B": {
+            "capacity": 80,
+            "description": "Maximum units that can be shipped from Warehouse B"
+        }
+    },
+    "customers": {
+        "Customer_1": {
+            "demand": 70,
+            "description": "Minimum units that must be delivered to Customer 1"
+        },
+        "Customer_2": {
+            "demand": 60,
+            "description": "Minimum units that must be delivered to Customer 2"
+        }
+    },
+    "constraint_types": {
+        "capacity_constraint": "Sum of shipments from each warehouse <= warehouse capacity",
+        "demand_constraint": "Sum of shipments to each customer >= customer demand"
+    }
+} 
