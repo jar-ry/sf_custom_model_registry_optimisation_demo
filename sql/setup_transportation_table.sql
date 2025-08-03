@@ -16,6 +16,9 @@ CREATE OR REPLACE TABLE transportation_data (
     last_updated TIMESTAMP
 );
 
+-- Grant necessary permissions (adjust role names as needed)
+GRANT SELECT, INSERT, UPDATE ON transportation_data TO ROLE CUSTOM_ML_REGISTRY_DEMO_ROLE;
+
 -- Insert sample transportation data
 INSERT INTO transportation_data VALUES
     ('Warehouse_A', 'Customer_1', 45, 1.25, 10, 0.8, 0.9, 1.0, 1.0, 1.0, CURRENT_TIMESTAMP()),
@@ -35,10 +38,6 @@ INSERT INTO transportation_data VALUES
     ('Warehouse_B', 'Customer_1', 68, 1.32, 8, 0.85, 1.4, 1.3, 1.05, 1.0, CURRENT_TIMESTAMP()),
     ('Warehouse_B', 'Customer_2', 38, 1.32, 8, 0.85, 0.9, 1.1, 1.05, 1.0, CURRENT_TIMESTAMP());
 
--- Verify the data
-SELECT COUNT(*) as total_records FROM transportation_data;
-SELECT DISTINCT warehouse, customer FROM transportation_data ORDER BY warehouse, customer;
-
 -- Show sample data with calculated costs
 SELECT 
     warehouse,
@@ -55,5 +54,3 @@ SELECT
 FROM transportation_data
 ORDER BY warehouse, customer, last_updated DESC
 LIMIT 10;
--- Grant necessary permissions (adjust role names as needed)
-GRANT SELECT, INSERT, UPDATE ON transportation_data TO ROLE CUSTOM_ML_REGISTRY_DEMO_ROLE;

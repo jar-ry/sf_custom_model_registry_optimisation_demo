@@ -54,11 +54,46 @@ class SnowflakeManager:
         """
         Establish and return a Snowpark Session for ML services.
         
+        Handles both local and Snowflake execution environments:
+        - In Snowflake: Uses the active session context
+        - Locally: Creates new session with explicit authentication
+        
         Returns:
             Session: Active Snowpark Session
         """
         if self._session is None:
-            self._session = self._create_snowpark_session()
+            # First try to get active session (when running in Snowflake)
+            try:
+                from snowflake.snowpark.context import get_active_session
+                self._session = get_active_session()
+                logger.info("✅ Using active Snowflake session context")
+                return self._session
+            except ImportError:
+                logger.info("🔧 Snowpark context not available, creating new session")
+            except Exception as e:
+                logger.info(f"🔧 No active session found ({type(e).__name__}: {e})")
+                
+                # Check if we're in a Snowflake execution environment
+                # If so, we should not try to create a new session with credentials
+                try:
+                    # Additional check for Snowflake environment indicators
+                    import os
+                    if any(key.startswith('SNOWFLAKE_') for key in os.environ if 'WAREHOUSE' in key or 'CLUSTER' in key):
+                        raise RuntimeError("Running in Snowflake environment but cannot access active session. "
+                                         "This might indicate a session context issue.")
+                except:
+                    pass
+                
+            # Only create new session if we're running locally
+            logger.info("🔧 Creating new Snowpark session for local execution")
+            try:
+                self._session = self._create_snowpark_session()
+            except ValueError as e:
+                if "No authentication method available" in str(e):
+                    raise RuntimeError("Cannot create session: No authentication available. "
+                                     "When running in Snowflake, ensure session context is available. "
+                                     "When running locally, provide SNOWFLAKE_PASSWORD or SNOWFLAKE_PRIVATE_KEY_PATH.") from e
+                raise
         
         return self._session
     
@@ -156,8 +191,8 @@ class SnowflakeManager:
         Initialize and return a Feature Store instance.
         
         Args:
-            database: Optional database name (uses env var if not provided)
-            schema: Optional schema name (uses env var if not provided)
+            database: Optional database name (uses current/env if not provided)
+            schema: Optional schema name (uses current/env if not provided)
             
         Returns:
             FeatureStore: Initialized Feature Store instance
@@ -165,8 +200,31 @@ class SnowflakeManager:
         if self._feature_store is None:
             # Use Snowpark Session for ML services
             session = self.get_session()
-            fs_database = database or os.getenv('SNOWFLAKE_DATABASE')
-            fs_schema = schema or os.getenv('SNOWFLAKE_SCHEMA')
+            
+            # Determine database and schema
+            fs_database = database
+            fs_schema = schema
+            
+            if fs_database is None or fs_schema is None:
+                # Try to get from session context first
+                try:
+                    if fs_database is None:
+                        fs_database = session.get_current_database()
+                    if fs_schema is None:
+                        fs_schema = session.get_current_schema()
+                    logger.info(f"🔧 Retrieved from session context: {fs_database}.{fs_schema}")
+                except Exception as e:
+                    logger.info(f"🔧 Could not get from session context ({type(e).__name__}), using environment variables")
+                    # Fall back to environment variables
+                    if fs_database is None:
+                        fs_database = os.getenv('SNOWFLAKE_DATABASE')
+                    if fs_schema is None:
+                        fs_schema = os.getenv('SNOWFLAKE_SCHEMA')
+                    logger.info(f"🔧 Retrieved from environment: {fs_database}.{fs_schema}")
+            
+            if not fs_database or not fs_schema:
+                raise ValueError(f"Database and schema must be specified. Got database='{fs_database}', schema='{fs_schema}'")
+                
             logger.info(f"🔧 Creating Feature Store in: {fs_database}.{fs_schema}")
             self._feature_store = FeatureStore(
                 session=session,
@@ -262,6 +320,53 @@ class SnowflakeManager:
 
 # Global instance for easy access
 snowflake_manager = SnowflakeManager()
+
+
+def is_running_in_snowflake() -> bool:
+    """
+    Detect if code is running within Snowflake execution environment.
+    
+    Uses multiple detection methods:
+    1. Active session availability
+    2. Environment variables that indicate Snowflake context
+    3. Python execution context indicators
+    
+    Returns:
+        bool: True if running in Snowflake, False if running locally
+    """
+    # Method 1: Try to get active session
+    try:
+        from snowflake.snowpark.context import get_active_session
+        get_active_session()
+        return True
+    except ImportError:
+        pass
+    except:
+        pass
+    
+    # Method 2: Check for Snowflake-specific environment variables
+    import os
+    snowflake_env_indicators = [
+        'SNOWFLAKE_WAREHOUSE_ID',
+        'SNOWFLAKE_CLUSTER_ID', 
+        'SNOWFLAKE_SESSION_ID',
+        'SNOWFLAKE_QUERY_ID',
+        'SNOWFLAKE_ACCOUNT_LOCATOR'
+    ]
+    
+    if any(os.getenv(key) for key in snowflake_env_indicators):
+        return True
+        
+    # Method 3: Check execution context (UDF, stored procedure, etc.)
+    try:
+        import sys
+        # In Snowflake UDFs, the module path often contains snowflake-specific paths
+        if any('snowflake' in str(path).lower() for path in sys.path):
+            return True
+    except:
+        pass
+        
+    return False
 
 
 def get_snowflake_connection() -> snowflake.connector.SnowflakeConnection:

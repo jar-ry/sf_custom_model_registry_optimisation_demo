@@ -22,7 +22,7 @@ from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col, current_timestamp, to_timestamp
 from snowflake.snowpark.types import StructType, StructField, StringType, FloatType, TimestampType, IntegerType
 
-from helper.snowflake_utils import get_feature_store, get_snowpark_session
+from helper.snowflake_utils import get_feature_store, get_snowpark_session, is_running_in_snowflake
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +43,62 @@ class TransportationFeatureStore:
         Initialize the Transportation Feature Store manager.
         
         Args:
-            database: Snowflake database name
-            schema: Snowflake schema name
+            database: Snowflake database name (optional)
+            schema: Snowflake schema name (optional)
         """
-        self.fs = get_feature_store(database, schema)
-        self.session = get_snowpark_session()
-        self.database = database or os.getenv('SNOWFLAKE_DATABASE')
-        self.schema = schema or os.getenv('SNOWFLAKE_SCHEMA')
+        # Get session first (handles both local and Snowflake environments)
+        try:
+            self.session = get_snowpark_session()
+        except Exception as e:
+            logger.error(f"Failed to get Snowpark session: {e}")
+            if is_running_in_snowflake():
+                # In Snowflake, try to get active session directly
+                try:
+                    from snowflake.snowpark.context import get_active_session
+                    self.session = get_active_session()
+                    logger.info("✅ Retrieved active session directly")
+                except Exception as session_error:
+                    raise RuntimeError(f"Cannot initialize feature store in Snowflake environment. "
+                                     f"Session error: {session_error}") from session_error
+            else:
+                raise RuntimeError(f"Cannot initialize feature store in local environment. "
+                                 f"Check your Snowflake credentials. Error: {e}") from e
+        
+        # Determine database and schema based on environment
+        in_snowflake = is_running_in_snowflake()
+        logger.info(f"🌍 Execution environment: {'Snowflake' if in_snowflake else 'Local'}")
+        
+        if database is None or schema is None:
+            # Try to get from current session context (when running in Snowflake)
+            try:
+                current_db = self.session.get_current_database()
+                current_schema = self.session.get_current_schema()
+                self.database = database or current_db
+                self.schema = schema or current_schema
+                logger.info(f"📍 Using session context: {self.database}.{self.schema}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not get database/schema from session: {e}")
+                # Fall back to environment variables (when running locally)
+                self.database = database or os.getenv('SNOWFLAKE_DATABASE')
+                self.schema = schema or os.getenv('SNOWFLAKE_SCHEMA')
+                logger.info(f"📍 Using environment variables: {self.database}.{self.schema}")
+        else:
+            self.database = database
+            self.schema = schema
+            logger.info(f"📍 Using provided parameters: {self.database}.{self.schema}")
+        
+        # Validate database and schema
+        if not self.database or not self.schema:
+            raise ValueError(f"Database and schema must be specified. "
+                           f"Got database='{self.database}', schema='{self.schema}'. "
+                           f"Please provide them explicitly or set SNOWFLAKE_DATABASE and SNOWFLAKE_SCHEMA environment variables.")
+        
+        # Initialize feature store with detected/provided database and schema
+        try:
+            self.fs = get_feature_store(self.database, self.schema)
+        except Exception as e:
+            logger.error(f"Failed to initialize feature store: {e}")
+            raise RuntimeError(f"Could not initialize feature store for {self.database}.{self.schema}: {e}") from e
         
         # Entity for route-based features
         self.route_entity = Entity(
@@ -159,16 +208,13 @@ class TransportationFeatureStore:
             ["Warehouse_B", "Customer_1"],
             ["Warehouse_B", "Customer_2"]
         ], schema=["warehouse", "customer"])
-        
         # Get the feature view
         cost_matrix_fv = self.fs.get_feature_view("cost_matrix_features", "1.0")
-        
         # Retrieve features using the feature store
         retrieved_features = self.fs.retrieve_feature_values(
             spine_df=entities_df,
             features=[cost_matrix_fv]
         )
-        
         # Convert to pandas and create cost matrix
         cost_matrix_df = retrieved_features.to_pandas()
         

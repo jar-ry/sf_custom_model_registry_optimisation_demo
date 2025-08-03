@@ -1,17 +1,35 @@
 # Transportation Optimization with Snowflake Feature Store
 
-A transportation linear programming optimization model that demonstrates **Snowflake Feature Store** integration for dynamic cost matrix management.
+A demonstration of using Snowflake's Feature Store and Model Registry for transportation cost optimization using linear programming. The model uses a **hybrid architecture** that automatically adapts to both programmatic Python usage and SQL-based execution.
 
-## 🎯 What This Demo Shows
+## 🎯 Key Features
 
+- **Hybrid Execution Modes**: 
+  - **Python Mode**: Full feature store integration for local/SPCS development
+  - **SQL Mode**: Pre-joined data for optimized UDF execution  
+  - **Auto-Detection**: Automatically chooses the best mode based on execution context
 - **Feature Store Integration**: Dynamic cost matrices calculated from transportation data in Snowflake
 - **Real-time Optimization**: Transportation costs update automatically as underlying data changes  
 - **Point-in-Time Lookups**: Historical cost matrix retrieval for analysis
 - **MLOps Best Practices**: Model registration and deployment in Snowflake
 - **Enterprise Ready**: No local files - everything lives in Snowflake
 
-## 🏗️ Architecture
+## 🏗️ Hybrid Architecture
 
+The model automatically detects its execution environment and adapts:
+
+```python
+# Auto mode (recommended) - detects context automatically
+model = create_snowflake_model(mode='auto')
+
+# Force Python mode for development/testing
+model = create_snowflake_model(mode='python')
+
+# Force SQL mode for UDF simulation
+model = create_snowflake_model(mode='sql')
+```
+
+**Data Flow:**
 ```
 SQL Script (creates table + data)
        ↓
@@ -19,16 +37,19 @@ Transportation Data Table (Snowflake)
        ↓
 Feature Store (cost_matrix_features)
        ↓
-Transportation Model (dynamic cost retrieval)
-       ↓
-Optimized Transportation Plans
+       ├─ Python Mode: Feature Store API ──┐
+       └─ SQL Mode: Pre-joined SQL Data ───┤
+                                          ↓
+                        Transportation Model
+                                          ↓
+                     Optimized Transportation Plans
 ```
 
 **Key Components:**
 - **Transportation Data**: Raw data with fuel prices, distances, capacity factors
 - **Feature Store**: Automated cost calculations using composite mathematical models  
 - **Cost Matrix Features**: Aggregated costs per route with statistical measures
-- **Optimization Model**: Linear programming with dynamic cost retrieval
+- **Hybrid Model**: Adapts execution mode based on context (Python API vs SQL UDF)
 
 ## 🚀 Quick Start (3 minutes)
 
@@ -74,24 +95,48 @@ Warehouse_A      52.72       82.59
 Warehouse_B     113.80       55.65
 ```
 
-### 4. Test the Model
+### 4. Test the Hybrid Model
 
 ```bash
-# Test optimization with feature store costs
+# Test all execution modes (auto-detection, Python, SQL)
 python main.py --test-override-fs
+
+# Or test explicit Python mode with feature store
+python main.py --test-fs
 ```
 
 **Expected Output:**
 ```
-Transportation LP Model - Feature Store Demo
-Testing 5 scenarios with feature store...
+Transportation LP Model - Hybrid Mode Demo
+Testing both Python mode (with feature store) and SQL mode (pre-joined data)
 
-Results Summary:
-✅ base_case: $832.72 (source: feature_store)
-✅ peak_season: $1041.72 (source: feature_store)
-✅ fuel_cost_spike: $1149.72 (source: feature_store)
-❌ reduced_capacity: N/A (source: feature_store)
-❌ impossible_demand: N/A (source: feature_store)
+============================================================
+🔍 Test 1: Auto Mode (Python mode expected)
+============================================================
+✅ Auto mode test successful!
+   Detected mode: python
+   Cost source: feature_store
+
+============================================================
+🐍 Test 2: Explicit Python Mode
+============================================================
+✅ Python mode test successful!
+   Mode: python
+   Cost source: feature_store
+
+============================================================
+🗄️ Test 3: SQL Mode (simulating UDF execution)
+============================================================
+✅ SQL mode test successful!
+   Mode: sql
+   Cost source: sql_input
+
+📊 Results Summary
+
+Auto Mode Results:
+  ✅ base_case: $832.72 (mode: python, source: feature_store)
+  ✅ peak_season: $1041.72 (mode: python, source: feature_store)
+  ❌ reduced_capacity: N/A (mode: python, source: feature_store)
 ```
 
 ### 5. Register Model (Optional)
@@ -165,30 +210,146 @@ results = model.predict(scenarios)
 
 ### Snowflake SQL Usage
 
-After model registration:
+After model registration, use feature store views directly in SQL:
+
+#### Option 1: Join with Feature Store Views (Recommended)
 
 ```sql
-WITH mv AS MODEL "TRANSPORTATION_OPTIMIZER_FS" VERSION "V1_0"
+-- Join feature store data with your scenarios
+WITH feature_data AS (
+  SELECT 
+    warehouse,
+    customer,
+    composite_cost,
+    feature_timestamp
+  FROM cost_matrix_features  -- Feature store view
+),
+scenarios AS (
+  SELECT 
+    'production_scenario' as scenario_name,
+    120 as warehouse_a_capacity,
+    90 as warehouse_b_capacity,
+    80 as customer_1_demand,
+    70 as customer_2_demand
+),
+cost_matrix AS (
+  SELECT 
+    s.*,
+    MAX(CASE WHEN f.warehouse = 'Warehouse_A' AND f.customer = 'Customer_1' THEN f.composite_cost END) as cost_a_to_1,
+    MAX(CASE WHEN f.warehouse = 'Warehouse_A' AND f.customer = 'Customer_2' THEN f.composite_cost END) as cost_a_to_2,
+    MAX(CASE WHEN f.warehouse = 'Warehouse_B' AND f.customer = 'Customer_1' THEN f.composite_cost END) as cost_b_to_1,
+    MAX(CASE WHEN f.warehouse = 'Warehouse_B' AND f.customer = 'Customer_2' THEN f.composite_cost END) as cost_b_to_2,
+    MAX(f.feature_timestamp) as feature_timestamp
+  FROM scenarios s
+  CROSS JOIN feature_data f
+  GROUP BY s.scenario_name, s.warehouse_a_capacity, s.warehouse_b_capacity, s.customer_1_demand, s.customer_2_demand
+)
 SELECT
     *,
-    mv ! "PREDICT"(
-        SCENARIO_NAME,
-        WAREHOUSE_A_CAPACITY,
-        WAREHOUSE_B_CAPACITY,
-        CUSTOMER_1_DEMAND,
-        CUSTOMER_2_DEMAND,
-        NULL, NULL, NULL, NULL,  -- No cost overrides needed
-        TRUE,  -- use_feature_store
-        NULL   -- feature_timestamp (use current)
-    )
-FROM (
-    SELECT 
-        'production_scenario' as SCENARIO_NAME,
-        120 as WAREHOUSE_A_CAPACITY,
-        90 as WAREHOUSE_B_CAPACITY,
-        80 as CUSTOMER_1_DEMAND,
-        70 as CUSTOMER_2_DEMAND
-);
+    TRANSPORTATION_OPTIMIZER_FS ! "PREDICT"(
+        scenario_name,
+        warehouse_a_capacity,
+        warehouse_b_capacity,
+        customer_1_demand,
+        customer_2_demand,
+        cost_a_to_1,
+        cost_a_to_2,
+        cost_b_to_1,
+        cost_b_to_2,
+        feature_timestamp
+    ) as optimization_result
+FROM cost_matrix;
+```
+
+#### Option 2: Historical Point-in-Time Analysis
+
+```sql
+-- Get cost matrix as of a specific date
+WITH historical_features AS (
+  SELECT 
+    warehouse,
+    customer,
+    composite_cost,
+    feature_timestamp
+  FROM cost_matrix_features
+  WHERE DATE(feature_timestamp) = '2024-01-15'  -- Historical date
+),
+scenarios AS (
+  SELECT 
+    'historical_analysis' as scenario_name,
+    100 as warehouse_a_capacity,
+    80 as warehouse_b_capacity,
+    70 as customer_1_demand,
+    60 as customer_2_demand
+),
+cost_matrix AS (
+  SELECT 
+    s.*,
+    MAX(CASE WHEN f.warehouse = 'Warehouse_A' AND f.customer = 'Customer_1' THEN f.composite_cost END) as cost_a_to_1,
+    MAX(CASE WHEN f.warehouse = 'Warehouse_A' AND f.customer = 'Customer_2' THEN f.composite_cost END) as cost_a_to_2,
+    MAX(CASE WHEN f.warehouse = 'Warehouse_B' AND f.customer = 'Customer_1' THEN f.composite_cost END) as cost_b_to_1,
+    MAX(CASE WHEN f.warehouse = 'Warehouse_B' AND f.customer = 'Customer_2' THEN f.composite_cost END) as cost_b_to_2,
+    MAX(f.feature_timestamp) as feature_timestamp
+  FROM scenarios s
+  CROSS JOIN historical_features f
+  GROUP BY s.scenario_name, s.warehouse_a_capacity, s.warehouse_b_capacity, s.customer_1_demand, s.customer_2_demand
+)
+SELECT
+    *,
+    TRANSPORTATION_OPTIMIZER_FS ! "PREDICT"(
+        scenario_name,
+        warehouse_a_capacity,
+        warehouse_b_capacity,
+        customer_1_demand,
+        customer_2_demand,
+        cost_a_to_1,
+        cost_a_to_2,
+        cost_b_to_1,
+        cost_b_to_2,
+        feature_timestamp
+    ) as optimization_result
+FROM cost_matrix;
+```
+
+#### Option 3: Cost Override Scenarios
+
+```sql
+-- Use feature store as base and override specific costs
+WITH base_features AS (
+  SELECT 
+    MAX(CASE WHEN warehouse = 'Warehouse_A' AND customer = 'Customer_1' THEN composite_cost END) as cost_a_to_1,
+    MAX(CASE WHEN warehouse = 'Warehouse_A' AND customer = 'Customer_2' THEN composite_cost END) as cost_a_to_2,
+    MAX(CASE WHEN warehouse = 'Warehouse_B' AND customer = 'Customer_1' THEN composite_cost END) as cost_b_to_1,
+    MAX(CASE WHEN warehouse = 'Warehouse_B' AND customer = 'Customer_2' THEN composite_cost END) as cost_b_to_2,
+    MAX(feature_timestamp) as feature_timestamp
+  FROM cost_matrix_features
+),
+scenarios AS (
+  SELECT 
+    'what_if_scenario' as scenario_name,
+    100 as warehouse_a_capacity,
+    80 as warehouse_b_capacity,
+    70 as customer_1_demand,
+    60 as customer_2_demand,
+    -- Override specific route cost for what-if analysis
+    7.50 as override_cost_a_to_1
+)
+SELECT
+    s.*,
+    TRANSPORTATION_OPTIMIZER_FS ! "PREDICT"(
+        s.scenario_name,
+        s.warehouse_a_capacity,
+        s.warehouse_b_capacity,
+        s.customer_1_demand,
+        s.customer_2_demand,
+        s.override_cost_a_to_1,  -- Use override
+        f.cost_a_to_2,           -- Use feature store
+        f.cost_b_to_1,           -- Use feature store
+        f.cost_b_to_2,           -- Use feature store
+        f.feature_timestamp
+    ) as optimization_result
+FROM scenarios s
+CROSS JOIN base_features f;
 ```
 
 ## 🛠️ Commands Reference
@@ -241,6 +402,91 @@ CREATE TABLE transportation_data (
     priority_multiplier FLOAT,      -- Priority shipping multiplier
     last_updated TIMESTAMP          -- When data was last updated
 );
+```
+
+## 🐍 Python API Usage Examples
+
+### Auto Mode (Recommended)
+
+```python
+from models.snowflake_transportation_model import create_snowflake_model
+import pandas as pd
+from datetime import datetime
+
+# Auto-detects execution environment (Python vs SQL)
+model = create_snowflake_model(mode='auto')
+
+scenarios = pd.DataFrame([{
+    'scenario_name': 'test_scenario',
+    'warehouse_a_capacity': 100,
+    'warehouse_b_capacity': 80,
+    'customer_1_demand': 70,
+    'customer_2_demand': 60,
+    'use_feature_store': True  # Use feature store in Python mode
+}])
+
+results = model.predict(scenarios)
+print(f"Mode: {results.loc[0, 'execution_mode']}")
+print(f"Cost source: {results.loc[0, 'cost_matrix_source']}")
+```
+
+### Explicit Python Mode with Feature Store
+
+```python
+# Force Python mode for feature store usage
+model = create_snowflake_model(mode='python')
+
+scenarios = pd.DataFrame([{
+    'scenario_name': 'feature_store_test',
+    'warehouse_a_capacity': 100,
+    'warehouse_b_capacity': 80,
+    'customer_1_demand': 70,
+    'customer_2_demand': 60,
+    'use_feature_store': True,
+    'feature_timestamp': datetime.now()  # Point-in-time lookup
+}])
+
+results = model.predict(scenarios)
+```
+
+### Cost Matrix Overrides in Python Mode
+
+```python
+# Override specific costs while using feature store as base
+scenarios = pd.DataFrame([{
+    'scenario_name': 'override_test',
+    'warehouse_a_capacity': 100,
+    'warehouse_b_capacity': 80, 
+    'customer_1_demand': 70,
+    'customer_2_demand': 60,
+    'use_feature_store': True,
+    'cost_a_to_1': 15.0,  # Override this specific cost
+    'cost_b_to_2': 12.0   # Override this specific cost
+}])
+
+results = model.predict(scenarios)
+# Uses feature store costs except for overridden values
+```
+
+### SQL Mode Simulation
+
+```python
+# Simulate UDF execution with pre-joined data
+model = create_snowflake_model(mode='sql')
+
+scenarios = pd.DataFrame([{
+    'scenario_name': 'sql_test',
+    'warehouse_a_capacity': 100,
+    'warehouse_b_capacity': 80,
+    'customer_1_demand': 70,
+    'customer_2_demand': 60,
+    # All cost parameters required in SQL mode
+    'cost_a_to_1': 10.0, 'cost_a_to_2': 12.0,
+    'cost_b_to_1': 15.0, 'cost_b_to_2': 8.0
+}])
+
+results = model.predict(scenarios)
+assert results.loc[0, 'execution_mode'] == 'sql'
 ```
 
 ## 📈 Feature Store Details
